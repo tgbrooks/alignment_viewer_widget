@@ -137,47 +137,90 @@ def _merge(p_cols, p_rels, pa, q_cols, q_rels, qa, qn):
     """
     nrows_p = len(p_cols[0])
     empty = (_EMPTY, -1)
-    out_cols: list[list[tuple[str, int]]] = []
-    out_rels: list[list[str]] = []
-    p = q = 0
 
-    def b_index(cell):
-        return cell[1] if _anchor_present(cell) else None
+    def collect(cols, rels, i, anchor):
+        """Run of columns with no anchor residue (insertions/flanks)."""
+        run = []
+        while i < len(cols) and not _anchor_present(cols[i][anchor]):
+            run.append((cols[i], rels[i]))
+            i += 1
+        return run, i
+
+    def combine(prun, qrun, leading):
+        """Overlay a P run and a Q run into shared columns.
+
+        Leading runs (before the first shared residue) are right-aligned so the
+        overhangs butt against the alignment start; all other runs are
+        left-aligned so they butt against the preceding residue / sequence end.
+        This keeps the trailing overhangs of both partners in the *same* columns
+        instead of one after the other.
+        """
+        width = max(len(prun), len(qrun))
+        oc: list = []
+        orl: list = []
+        for k in range(width):
+            pi = k - (width - len(prun)) if leading else k
+            qi = k - (width - len(qrun)) if leading else k
+            pv = 0 <= pi < len(prun)
+            qv = 0 <= qi < len(qrun)
+            if pv:
+                cells = list(prun[pi][0])
+                rl = list(prun[pi][1])
+            else:
+                cells = [empty] * nrows_p
+                rl = ["."] * (nrows_p - 1)
+            if not pv and qv:
+                cells[pa] = qrun[qi][0][qa]  # keep anchor gap/empty consistent
+            if qv:
+                cnew, crel = qrun[qi][0][qn], qrun[qi][1]
+            else:
+                cnew, crel = empty, "."
+            oc.append(cells + [cnew])
+            orl.append(rl + [crel])
+        return oc, orl
+
+    out_cols: list = []
+    out_rels: list = []
+    p = q = 0
+    seen_anchor = False
 
     while p < len(p_cols) or q < len(q_cols):
-        pcol = p_cols[p] if p < len(p_cols) else None
-        qcol = q_cols[q] if q < len(q_cols) else None
-        bp = b_index(pcol[pa]) if pcol is not None else None
-        bq = b_index(qcol[qa]) if qcol is not None else None
+        prun, p = collect(p_cols, p_rels, p, pa)
+        qrun, q = collect(q_cols, q_rels, q, qa)
+        cc, rr = combine(prun, qrun, leading=not seen_anchor)
+        out_cols += cc
+        out_rels += rr
 
-        if bp is not None and bq is not None and bp == bq:
-            out_cols.append(list(pcol) + [qcol[qn]])
-            out_rels.append(list(p_rels[p]) + [q_rels[q]])
-            p += 1
-            q += 1
-        elif pcol is not None and bp is None:
-            # P column with no anchor residue (insertion/flank of other P rows).
-            out_cols.append(list(pcol) + [empty])
+        if p < len(p_cols) and q < len(q_cols):
+            bp, bq = p_cols[p][pa][1], q_cols[q][qa][1]
+            if bp == bq:
+                out_cols.append(list(p_cols[p]) + [q_cols[q][qn]])
+                out_rels.append(list(p_rels[p]) + [q_rels[q]])
+                p += 1
+                q += 1
+            elif bp < bq:
+                out_cols.append(list(p_cols[p]) + [empty])
+                out_rels.append(list(p_rels[p]) + ["."])
+                p += 1
+            else:
+                col = [empty] * nrows_p
+                col[pa] = q_cols[q][qa]
+                out_cols.append(col + [q_cols[q][qn]])
+                out_rels.append(["."] * (nrows_p - 1) + [q_rels[q]])
+                q += 1
+            seen_anchor = True
+        elif p < len(p_cols):
+            out_cols.append(list(p_cols[p]) + [empty])
             out_rels.append(list(p_rels[p]) + ["."])
             p += 1
-        elif qcol is not None and bq is None:
-            # Q column with no anchor residue (insertion/flank of new row).
+            seen_anchor = True
+        elif q < len(q_cols):
             col = [empty] * nrows_p
-            col[pa] = qcol[qa]
-            out_cols.append(col + [qcol[qn]])
+            col[pa] = q_cols[q][qa]
+            out_cols.append(col + [q_cols[q][qn]])
             out_rels.append(["."] * (nrows_p - 1) + [q_rels[q]])
             q += 1
-        elif bp is not None and (bq is None or bp < bq):
-            out_cols.append(list(pcol) + [empty])
-            out_rels.append(list(p_rels[p]) + ["."])
-            p += 1
-        else:
-            col = [empty] * nrows_p
-            if qcol is not None:
-                col[pa] = qcol[qa]
-                out_cols.append(col + [qcol[qn]])
-                out_rels.append(["."] * (nrows_p - 1) + [q_rels[q]])
-            q += 1
+            seen_anchor = True
 
     return out_cols, out_rels
 

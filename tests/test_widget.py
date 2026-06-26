@@ -114,6 +114,36 @@ def test_stack_helper_and_names():
     assert len(w.relations) == 2
 
 
+def test_chain_overhangs_overlap_when_anchor_is_short():
+    aligner = _local_aligner()
+    import random
+
+    rng = random.Random(2)
+    b = "".join(rng.choice("ACGT") for _ in range(60))
+    a = "AAAAAAAAAA" + b + "TTTTTTTTTT"  # 10 bp overhang each side
+    c = "GGGGGGG" + b + "CCCCCCCCCCCC"  # 7 / 12 bp overhangs
+
+    data = _extract_chain([aligner.align(a, b), aligner.align(b, c)])
+    seqs = data["seqs"]
+    assert _strip(seqs[0]) == a
+    assert _strip(seqs[2]) == c
+
+    # The two outer sequences' overhangs share columns (B absent there) rather
+    # than being laid out one after the other.
+    def base(ch):
+        return ch not in (" ", "-")
+
+    overlap = sum(
+        1
+        for col in range(len(seqs[0]))
+        if base(seqs[0][col]) and base(seqs[2][col]) and not base(seqs[1][col])
+    )
+    assert overlap >= 17  # 10 (right) + 7 (left) overlapping columns
+
+    # Total width is driven by the longer overhang per side, not their sum.
+    assert len(seqs[0]) == len(b) + max(10, 7) + max(10, 12)
+
+
 def test_chain_requires_shared_sequence():
     aligner = _local_aligner()
     import pytest
