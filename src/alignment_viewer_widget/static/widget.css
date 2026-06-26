@@ -1,0 +1,171 @@
+.avw {
+  --avw-border: #d0d7de;
+  --avw-muted: #6a737d;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  border: 1px solid var(--avw-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  color: #24292f;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.avw * {
+  box-sizing: border-box;
+}
+
+.avw-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f6f8fa;
+  border-bottom: 1px solid var(--avw-border);
+  flex-wrap: wrap;
+}
+
+.avw-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.avw-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--avw-muted);
+}
+
+.avw-chip {
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: #fff;
+}
+.avw-chip-mm {
+  background: #e5484d;
+}
+.avw-chip-gap {
+  background: #99a0a8;
+}
+
+.avw-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--avw-border);
+  font-size: 12px;
+  color: var(--avw-muted);
+  flex-wrap: wrap;
+}
+
+.avw-btn {
+  border: 1px solid var(--avw-border);
+  background: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #24292f;
+}
+.avw-btn:hover {
+  background: #f3f4f6;
+}
+
+.avw-goto {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+}
+.avw-goto-input {
+  width: 80px;
+  padding: 2px 6px;
+  border: 1px solid var(--avw-border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.avw-zoomlabel {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.avw-minimap {
+  display: block;
+  margin: 4px 2px 0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.avw-body {
+  display: flex;
+  align-items: stretch;
+  padding: 6px 2px 8px;
+}
+
+.avw-gutter {
+  flex: 0 0 auto;
+  border-right: 1px solid var(--avw-border);
+}
+
+.avw-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.avw-spacer {
+  height: 1px;
+}
+
+.avw-main {
+  position: sticky;
+  left: 0;
+  top: 0;
+  display: block;
+}
+
+.avw-tooltip {
+  position: absolute;
+  z-index: 20;
+  pointer-events: none;
+  background: #1f2328;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 9px;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  max-width: 260px;
+}
+.avw-tooltip code {
+  font-family: ui-monospace, monospace;
+  background: rgba(255, 255, 255, 0.15);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.avw-tt-head {
+  font-weight: 600;
+  margin-bottom: 3px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  padding-bottom: 3px;
+}
+.avw-tt-key {
+  color: #9aa0a6;
+}
+.avw-tt-match {
+  color: #5dd879;
+}
+.avw-tt-mm {
+  color: #ff8a8a;
+}
+.avw-tt-gap {
+  color: #c2c8cf;
+}

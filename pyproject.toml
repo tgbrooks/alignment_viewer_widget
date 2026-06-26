@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alignment-viewer-widget"
+version = "0.1.0"
+description = "Interactive viewer for Biopython pairwise alignments in marimo / Jupyter notebooks"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "tgbrooks" }]
+keywords = ["bioinformatics", "alignment", "biopython", "marimo", "anywidget"]
+dependencies = [
+    "anywidget>=0.9",
+    "biopython>=1.80",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "marimo"]
+
+[project.urls]
+Homepage = "https://github.com/tgbrooks/alignment_viewer_widget"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alignment_viewer_widget"]
