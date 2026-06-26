@@ -40,6 +40,11 @@
   color: var(--avw-muted);
 }
 
+.avw-range {
+  color: var(--avw-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .avw-chip {
   padding: 1px 7px;
   border-radius: 10px;

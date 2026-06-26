@@ -4,8 +4,8 @@ from Bio.Align import PairwiseAligner
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-from alignment_viewer_widget import AlignmentViewer, view
-from alignment_viewer_widget._widget import _extract
+from alignment_viewer_widget import AlignmentViewer, stack, view
+from alignment_viewer_widget._widget import _extract_chain, _extract_single
 
 
 def _local_aligner():
@@ -18,92 +18,108 @@ def _local_aligner():
     return aligner
 
 
-def test_extract_parallel_arrays_consistent():
+def _strip(s):
+    return s.replace("-", "").replace(" ", "")
+
+
+# --- single pairwise -------------------------------------------------------
+
+
+def test_single_model_shapes():
     aligner = _local_aligner()
-    seq1 = "TTGCCACGTAGGCTTAGCATCGGGATCGATCGATCGTAGCTAGCATCGATCG"
-    seq2 = "AAAGCCACGTAGGCTTAGGATCGGGATCGATCGTAGCTAGCATCGATCGTTT"
-    data = _extract(aligner.align(seq1, seq2))
-
-    n = len(data["seq_top"])
-    assert len(data["seq_bot"]) == n
-    assert len(data["kinds"]) == n
-    assert len(data["top_pos"]) == n
-    assert len(data["bot_pos"]) == n
-    assert set(data["kinds"]) <= set("mxgu")
-    assert 0 <= data["aligned_start"] <= data["aligned_end"] <= n
+    data = _extract_single(aligner.align("ACGTACGT", "ACGTTCGT")[0])
+    assert len(data["seqs"]) == 2
+    n = len(data["seqs"][0])
+    assert all(len(s) == n for s in data["seqs"])
+    assert len(data["relations"]) == 1
+    assert len(data["relations"][0]) == n
+    assert set(data["relations"][0]) <= set("mxg.")
+    assert "x" in data["relations"][0]  # the single substitution
 
 
-def test_kinds_classify_aligned_region():
+def test_single_flank_range():
     aligner = _local_aligner()
-    data = _extract(aligner.align("ACGTACGT", "ACGTTCGT")[0])
-    s, e = data["aligned_start"], data["aligned_end"]
-    aligned_kinds = data["kinds"][s:e]
-    assert "x" in aligned_kinds  # the single substitution
-    assert aligned_kinds.count("m") == 7
-
-
-def test_flanks_present_for_local_overhang():
-    aligner = _local_aligner()
-    # Alignment sits in the middle of the target, with overhangs both sides.
     target = "CCCCCGGGGG" + "ACGTACGTACGTACGT" + "TTTTTAAAAA"
     query = "GG" + "ACGTACGTAGGTACGT" + "AA"
-    data = _extract(aligner.align(target, query)[0])
-
-    # There are unaligned flank columns, and the aligned region is interior.
-    assert "u" in data["kinds"]
+    data = _extract_single(aligner.align(target, query)[0])
     assert data["aligned_start"] > 0
-    assert data["aligned_end"] < len(data["seq_top"])
-    # Totals reflect the full sequences.
-    assert data["total_top"] == len(target)
-    assert data["total_bot"] == len(query)
-    # Flank columns carry real positions for whichever row has a base.
-    s = data["aligned_start"]
-    assert any(
-        data["top_pos"][i] >= 0 or data["bot_pos"][i] >= 0 for i in range(s)
-    )
+    assert data["aligned_end"] < len(data["seqs"][0])
+    assert data["show_boundaries"] is True
+    assert _strip(data["seqs"][0]) == target
+    assert _strip(data["seqs"][1]) == query
 
 
-def test_no_flanks_when_alignment_spans_sequences():
+def test_widget_constructs_single():
     aligner = _local_aligner()
-    data = _extract(aligner.align("ACGTACGT", "ACGTACGT")[0])
-    assert data["aligned_start"] == 0
-    assert data["aligned_end"] == len(data["seq_top"])
-    assert "u" not in data["kinds"]
-
-
-def test_widget_constructs_and_syncs_traits():
-    aligner = _local_aligner()
-    alns = aligner.align("ACGTACGTAC", "ACGTTCGTAC")
-    w = AlignmentViewer(alns, base_width=9)
-    assert w.seq_top and w.seq_bot
+    w = AlignmentViewer(aligner.align("ACGTACGTAC", "ACGTTCGTAC"), base_width=9)
+    assert len(w.seqs) == 2
     assert w.base_width == 9
-    assert len(w.top_pos) == len(w.seq_top)
-    assert isinstance(view(alns), AlignmentViewer)
+    assert len(w.positions[0]) == len(w.seqs[0])
+    assert isinstance(view(aligner.align("AC", "AC")), AlignmentViewer)
 
 
-def test_custom_names_override_defaults():
+def test_custom_names_single():
     aligner = _local_aligner()
-    alns = aligner.align("ACGTACGT", "ACGTTCGT")
-    w = AlignmentViewer(alns, name1="Reference", name2="Read 1")
-    assert w.label_top == "Reference"
-    assert w.label_bottom == "Read 1"
+    w = AlignmentViewer(aligner.align("ACGTACGT", "ACGTTCGT"), name1="Ref", name2="Read")
+    assert w.labels == ["Ref", "Read"]
 
 
-def test_seqrecord_labels_used_when_no_override():
+def test_seqrecord_labels():
     aligner = _local_aligner()
     a = SeqRecord(Seq("ACGTACGT"), id="chrA")
     b = SeqRecord(Seq("ACGTTCGT"), id="readB")
-    data = _extract(aligner.align(a, b)[0])
-    assert data["label_top"] == "chrA"
-    assert data["label_bottom"] == "readB"
-    # Full sequences are recovered from the SeqRecords (not the str summary).
-    assert data["total_top"] == 8
+    data = _extract_single(aligner.align(a, b)[0])
+    assert data["labels"] == ["chrA", "readB"]
 
 
-def test_explicit_name_beats_seqrecord_id():
+# --- stacked chain ---------------------------------------------------------
+
+
+def _chain():
     aligner = _local_aligner()
-    a = SeqRecord(Seq("ACGTACGT"), id="chrA")
-    b = SeqRecord(Seq("ACGTTCGT"), id="readB")
-    w = AlignmentViewer(aligner.align(a, b), name1="Custom")
-    assert w.label_top == "Custom"
-    assert w.label_bottom == "readB"
+    import random
+
+    rng = random.Random(0)
+    b = "".join(rng.choice("ACGT") for _ in range(80))
+    a = "TTTTT" + b[10:60] + "GGG"
+    c = b[30:80] + "CCCCC"
+    return aligner, a, b, c
+
+
+def test_chain_reconstructs_all_rows():
+    aligner, a, b, c = _chain()
+    data = _extract_chain([aligner.align(a, b), aligner.align(b, c)])
+    assert len(data["seqs"]) == 3
+    n = len(data["seqs"][0])
+    assert all(len(s) == n for s in data["seqs"])
+    assert len(data["relations"]) == 2
+    assert _strip(data["seqs"][0]) == a
+    assert _strip(data["seqs"][1]) == b
+    assert _strip(data["seqs"][2]) == c
+    # A-C are never directly related (only adjacent pairs carry relations).
+    assert data["show_boundaries"] is False
+
+
+def test_chain_labels_unique_default():
+    aligner, a, b, c = _chain()
+    data = _extract_chain([aligner.align(a, b), aligner.align(b, c)])
+    assert data["labels"] == ["seq1", "seq2", "seq3"]
+
+
+def test_stack_helper_and_names():
+    aligner, a, b, c = _chain()
+    w = stack([aligner.align(a, b), aligner.align(b, c)], names=["A", "B", "C"])
+    assert len(w.seqs) == 3
+    assert w.labels == ["A", "B", "C"]
+    assert len(w.relations) == 2
+
+
+def test_chain_requires_shared_sequence():
+    aligner = _local_aligner()
+    import pytest
+
+    # Both alignments are valid, but the second shares no sequence with the first.
+    with pytest.raises(ValueError):
+        _extract_chain(
+            [aligner.align("ACGTACGT", "ACGTTCGT"), aligner.align("GGGGCCCC", "GGGGACCC")]
+        )

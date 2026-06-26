@@ -1,4 +1,9 @@
-"""anywidget-based viewer for Biopython pairwise alignments."""
+"""anywidget-based viewer for Biopython pairwise alignments.
+
+Supports a single pairwise alignment (two rows) as well as a *chain* of
+pairwise alignments that share sequences (e.g. A-B and B-C), which are merged
+on the shared sequence and stacked so A, B and C are shown together.
+"""
 
 from __future__ import annotations
 
@@ -10,18 +15,12 @@ import traitlets
 
 _STATIC = pathlib.Path(__file__).parent / "static"
 
-# Per-column kind codes (kept in sync with widget.js).
-#   m = match, x = mismatch, g = gap, u = unaligned flank/overhang
-_EMPTY = " "  # placeholder char for "no base in this row of this column"
+_GAP = "-"
+_EMPTY = " "
 
 
 def _as_alignment(alignment: Any):
-    """Coerce the argument into a single ``Bio.Align.Alignment``.
-
-    Accepts an ``Alignment`` directly, or the ``PairwiseAlignments`` iterator
-    returned by ``aligner.align(...)`` (in which case the best/first alignment
-    is used).
-    """
+    """Coerce into a single ``Bio.Align.Alignment``."""
     if hasattr(alignment, "coordinates") and hasattr(alignment, "indices"):
         return alignment
     try:
@@ -34,7 +33,6 @@ def _as_alignment(alignment: Any):
 
 
 def _label_for(seq: Any, fallback: str) -> str:
-    """Best-effort human label for a sequence (SeqRecord id, etc.)."""
     for attr in ("id", "name"):
         value = getattr(seq, attr, None)
         if value and value != "<unknown id>":
@@ -43,96 +41,71 @@ def _label_for(seq: Any, fallback: str) -> str:
 
 
 def _full_seq(seq: Any) -> str:
-    """Full underlying sequence string (handles SeqRecord -> Seq)."""
     return str(getattr(seq, "seq", seq))
 
 
-def _extract(alignment: Any) -> dict[str, Any]:
-    """Build the full renderable column model from a Biopython Alignment.
+def _relation(ca: str, cb: str) -> str:
+    """Relation between two aligned-region characters."""
+    if ca == _GAP or cb == _GAP:
+        return "g"
+    return "m" if ca.upper() == cb.upper() else "x"
 
-    The model spans the aligned region *and* the unaligned flanks ("overhangs")
-    on either side, so the viewer can show the parts of each sequence that fall
-    outside a local alignment. Columns are described by parallel arrays:
 
-    ``seq_top`` / ``seq_bot``
-        One character per column for each row (``-`` gap, space = no base).
-    ``kinds``
-        One code per column: ``m`` match, ``x`` mismatch, ``g`` gap,
-        ``u`` unaligned flank.
-    ``top_pos`` / ``bot_pos``
-        Original 0-based sequence position for each column (``-1`` = none).
-    ``aligned_start`` / ``aligned_end``
-        Column range [start, end) covering the alignment proper (flanks lie
-        before/after).
+def _pair_columns(aln: Any) -> dict[str, Any]:
+    """Column model for one pairwise alignment, including unaligned flanks.
+
+    Returns columns as a list of ``[(char, pos), (char, pos)]`` (two rows) plus
+    the per-column relation, labels, full-sequence strings, totals, the
+    aligned column range and the score.
     """
-    aln = _as_alignment(alignment)
-
+    aln = _as_alignment(aln)
     target_row = str(aln[0])
     query_row = str(aln[1])
-    indices = aln.indices
-    t_idx = [int(i) for i in indices[0]]
-    q_idx = [int(i) for i in indices[1]]
+    idx = aln.indices
+    t_idx = [int(i) for i in idx[0]]
+    q_idx = [int(i) for i in idx[1]]
 
-    sequences = getattr(aln, "sequences", [None, None])
-    full_t = _full_seq(sequences[0]) if sequences[0] is not None else target_row.replace("-", "")
-    full_q = _full_seq(sequences[1]) if sequences[1] is not None else query_row.replace("-", "")
+    seqs = getattr(aln, "sequences", [None, None])
+    full_t = _full_seq(seqs[0]) if seqs[0] is not None else target_row.replace(_GAP, "")
+    full_q = _full_seq(seqs[1]) if seqs[1] is not None else query_row.replace(_GAP, "")
 
     t_used = [i for i in t_idx if i >= 0]
     q_used = [i for i in q_idx if i >= 0]
     t_lo, t_hi = (min(t_used), max(t_used)) if t_used else (0, -1)
     q_lo, q_hi = (min(q_used), max(q_used)) if q_used else (0, -1)
 
-    # Flanking (unaligned) sequence on each side, in original coordinates.
     t_left, q_left = full_t[:t_lo], full_q[:q_lo]
     t_right, q_right = full_t[t_hi + 1 :], full_q[q_hi + 1 :]
 
-    seq_top: list[str] = []
-    seq_bot: list[str] = []
-    kinds: list[str] = []
-    top_pos: list[int] = []
-    bot_pos: list[int] = []
+    cols: list[list[tuple[str, int]]] = []
+    rels: list[str] = []
 
-    def add(tc: str, qc: str, tp: int, qp: int, kind: str) -> None:
-        seq_top.append(tc)
-        seq_bot.append(qc)
-        top_pos.append(tp)
-        bot_pos.append(qp)
-        kinds.append(kind)
+    def flank_cell(s: str, i: int):
+        ok = 0 <= i < len(s)
+        return (s[i], i) if ok else (_EMPTY, -1)
 
-    # --- Left flank: right-aligned so it butts against the alignment ---------
+    # Left flank, right-aligned against the alignment.
     wl = max(len(t_left), len(q_left))
     for c in range(wl):
         ti = c - (wl - len(t_left))
         qi = c - (wl - len(q_left))
-        tc = t_left[ti] if 0 <= ti < len(t_left) else _EMPTY
-        qc = q_left[qi] if 0 <= qi < len(q_left) else _EMPTY
-        add(tc, qc, ti if tc != _EMPTY else -1, qi if qc != _EMPTY else -1, "u")
+        cols.append([flank_cell(t_left, ti), flank_cell(q_left, qi)])
+        rels.append(".")
 
-    # --- Aligned region ------------------------------------------------------
-    aligned_start = len(seq_top)
+    aligned_start = len(cols)
     for c in range(len(target_row)):
         tc, qc = target_row[c], query_row[c]
-        if tc == "-" or qc == "-":
-            kind = "g"
-        elif tc.upper() == qc.upper():
-            kind = "m"
-        else:
-            kind = "x"
-        add(tc, qc, t_idx[c], q_idx[c], kind)
-    aligned_end = len(seq_top)
+        cols.append([(tc, t_idx[c]), (qc, q_idx[c])])
+        rels.append(_relation(tc, qc))
+    aligned_end = len(cols)
 
-    # --- Right flank: left-aligned -------------------------------------------
+    # Right flank, left-aligned.
     wr = max(len(t_right), len(q_right))
     for c in range(wr):
-        tc = t_right[c] if c < len(t_right) else _EMPTY
-        qc = q_right[c] if c < len(q_right) else _EMPTY
-        add(
-            tc,
-            qc,
-            (t_hi + 1 + c) if tc != _EMPTY else -1,
-            (q_hi + 1 + c) if qc != _EMPTY else -1,
-            "u",
-        )
+        tc, tp = (t_right[c], t_hi + 1 + c) if c < len(t_right) else (_EMPTY, -1)
+        qc, qp = (q_right[c], q_hi + 1 + c) if c < len(q_right) else (_EMPTY, -1)
+        cols.append([(tc, tp), (qc, qp)])
+        rels.append(".")
 
     try:
         score = float(aln.score)
@@ -140,33 +113,163 @@ def _extract(alignment: Any) -> dict[str, Any]:
         score = None
 
     return {
-        "seq_top": "".join(seq_top),
-        "seq_bot": "".join(seq_bot),
-        "kinds": "".join(kinds),
-        "top_pos": top_pos,
-        "bot_pos": bot_pos,
-        "aligned_start": aligned_start,
-        "aligned_end": aligned_end,
-        "total_top": len(full_t),
-        "total_bot": len(full_q),
-        "label_top": _label_for(sequences[0], "target"),
-        "label_bottom": _label_for(sequences[1], "query"),
+        "cols": cols,
+        "rels": rels,
+        "labels": [_label_for(seqs[0], ""), _label_for(seqs[1], "")],
+        "fulls": [full_t, full_q],
+        "totals": [len(full_t), len(full_q)],
+        "aligned_range": (aligned_start, aligned_end),
         "score": score,
     }
 
 
+def _anchor_present(cell: tuple[str, int]) -> bool:
+    return cell[0] != _EMPTY and cell[0] != _GAP
+
+
+def _merge(p_cols, p_rels, pa, q_cols, q_rels, qa, qn):
+    """Merge profile columns with a pairwise alignment on a shared sequence.
+
+    ``pa`` is the anchor row index within the profile; ``qa`` / ``qn`` are the
+    anchor / new row indices within the pairwise alignment. Both anchor rows
+    contain the *complete* shared sequence, so columns are merged by anchor
+    residue index.
+    """
+    nrows_p = len(p_cols[0])
+    empty = (_EMPTY, -1)
+    out_cols: list[list[tuple[str, int]]] = []
+    out_rels: list[list[str]] = []
+    p = q = 0
+
+    def b_index(cell):
+        return cell[1] if _anchor_present(cell) else None
+
+    while p < len(p_cols) or q < len(q_cols):
+        pcol = p_cols[p] if p < len(p_cols) else None
+        qcol = q_cols[q] if q < len(q_cols) else None
+        bp = b_index(pcol[pa]) if pcol is not None else None
+        bq = b_index(qcol[qa]) if qcol is not None else None
+
+        if bp is not None and bq is not None and bp == bq:
+            out_cols.append(list(pcol) + [qcol[qn]])
+            out_rels.append(list(p_rels[p]) + [q_rels[q]])
+            p += 1
+            q += 1
+        elif pcol is not None and bp is None:
+            # P column with no anchor residue (insertion/flank of other P rows).
+            out_cols.append(list(pcol) + [empty])
+            out_rels.append(list(p_rels[p]) + ["."])
+            p += 1
+        elif qcol is not None and bq is None:
+            # Q column with no anchor residue (insertion/flank of new row).
+            col = [empty] * nrows_p
+            col[pa] = qcol[qa]
+            out_cols.append(col + [qcol[qn]])
+            out_rels.append(["."] * (nrows_p - 1) + [q_rels[q]])
+            q += 1
+        elif bp is not None and (bq is None or bp < bq):
+            out_cols.append(list(pcol) + [empty])
+            out_rels.append(list(p_rels[p]) + ["."])
+            p += 1
+        else:
+            col = [empty] * nrows_p
+            if qcol is not None:
+                col[pa] = qcol[qa]
+                out_cols.append(col + [qcol[qn]])
+                out_rels.append(["."] * (nrows_p - 1) + [q_rels[q]])
+            q += 1
+
+    return out_cols, out_rels
+
+
+def _finalize_labels(labels: list) -> list:
+    """Give every row a unique, non-empty label (default ``seqN``)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for i, lab in enumerate(labels):
+        name = lab or f"seq{i + 1}"
+        if name in seen:
+            name = f"{name} ({i + 1})"
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _model_from_columns(cols, rels, labels, totals, scores, aligned_range):
+    """Turn the merged column model into the trait payload."""
+    nrows = len(cols[0]) if cols else 0
+    ncols = len(cols)
+    seqs = ["".join(cols[c][r][0] for c in range(ncols)) for r in range(nrows)]
+    positions = [[cols[c][r][1] for c in range(ncols)] for r in range(nrows)]
+    relations = ["".join(rels[c][a] for c in range(ncols)) for a in range(nrows - 1)]
+    return {
+        "seqs": seqs,
+        "positions": positions,
+        "relations": relations,
+        "labels": _finalize_labels(labels),
+        "totals": list(totals),
+        "scores": list(scores),
+        "aligned_start": aligned_range[0],
+        "aligned_end": aligned_range[1],
+        "show_boundaries": nrows == 2,
+    }
+
+
+def _extract_single(alignment: Any) -> dict[str, Any]:
+    pc = _pair_columns(alignment)
+    return _model_from_columns(
+        pc["cols"], [[r] for r in pc["rels"]], pc["labels"], pc["totals"],
+        [pc["score"]], pc["aligned_range"],
+    )
+
+
+def _extract_chain(alignments: list) -> dict[str, Any]:
+    parts = [_pair_columns(a) for a in alignments]
+    first = parts[0]
+    cols = first["cols"]
+    rels = [[r] for r in first["rels"]]
+    labels = list(first["labels"])
+    fulls = list(first["fulls"])
+    totals = list(first["totals"])
+    scores = [first["score"]]
+
+    for part in parts[1:]:
+        f2 = part["fulls"]
+        candidates = [i for i, f in enumerate(fulls) if f in f2]
+        if not candidates:
+            raise ValueError(
+                "Consecutive alignments must share a sequence to be stacked; "
+                "no shared sequence found between rows %r and %r"
+                % (labels, part["labels"])
+            )
+        pa = candidates[-1]  # most recently added shared row
+        anchor = fulls[pa]
+        qa = f2.index(anchor)
+        qn = 1 - qa
+        cols, rels = _merge(cols, rels, pa, part["cols"], part["rels"], qa, qn)
+        labels.append(part["labels"][qn])
+        fulls.append(f2[qn])
+        totals.append(part["totals"][qn])
+        scores.append(part["score"])
+
+    return _model_from_columns(cols, rels, labels, totals, scores, (0, 0))
+
+
 class AlignmentViewer(anywidget.AnyWidget):
-    """Interactive, horizontally-scrolling viewer for a pairwise alignment.
+    """Interactive, horizontally-scrolling viewer for pairwise alignment(s).
 
     Parameters
     ----------
     alignment:
-        A ``Bio.Align.Alignment`` (e.g. ``aligner.align(a, b)[0]``) or the
-        ``PairwiseAlignments`` object returned by ``aligner.align(a, b)`` (the
-        best alignment is shown).
+        A single ``Bio.Align.Alignment`` / ``PairwiseAlignments`` (two rows),
+        **or** a list of pairwise alignments that share sequences in a chain
+        (e.g. ``[align_AB, align_BC]``); these are merged on the shared
+        sequence and stacked so A, B and C are shown together.
     name1, name2:
-        Optional display labels for the first (target) and second (query)
-        sequences. Override any ids inferred from ``SeqRecord`` inputs.
+        Optional labels for the two rows of a single alignment.
+    names:
+        Optional list of labels for every row (length = number of sequences).
+        Overrides inferred / ``name1``/``name2`` labels.
     base_width:
         Pixel width allotted to each alignment column (zoom level).
     """
@@ -174,18 +277,15 @@ class AlignmentViewer(anywidget.AnyWidget):
     _esm = _STATIC / "widget.js"
     _css = _STATIC / "widget.css"
 
-    seq_top = traitlets.Unicode("").tag(sync=True)
-    seq_bot = traitlets.Unicode("").tag(sync=True)
-    kinds = traitlets.Unicode("").tag(sync=True)
-    top_pos = traitlets.List(traitlets.Int()).tag(sync=True)
-    bot_pos = traitlets.List(traitlets.Int()).tag(sync=True)
+    seqs = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    positions = traitlets.List(traitlets.List(traitlets.Int())).tag(sync=True)
+    relations = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    totals = traitlets.List(traitlets.Int()).tag(sync=True)
+    scores = traitlets.List(traitlets.Float(allow_none=True)).tag(sync=True)
     aligned_start = traitlets.Int(0).tag(sync=True)
     aligned_end = traitlets.Int(0).tag(sync=True)
-    total_top = traitlets.Int(0).tag(sync=True)
-    total_bot = traitlets.Int(0).tag(sync=True)
-    label_top = traitlets.Unicode("target").tag(sync=True)
-    label_bottom = traitlets.Unicode("query").tag(sync=True)
-    score = traitlets.Float(allow_none=True, default_value=None).tag(sync=True)
+    show_boundaries = traitlets.Bool(True).tag(sync=True)
 
     base_width = traitlets.Int(11).tag(sync=True)
 
@@ -195,18 +295,36 @@ class AlignmentViewer(anywidget.AnyWidget):
         *,
         name1: str | None = None,
         name2: str | None = None,
+        names: list | None = None,
         base_width: int = 11,
         **kwargs: Any,
     ) -> None:
-        data = _extract(alignment)
+        if isinstance(alignment, (list, tuple)):
+            data = _extract_chain(list(alignment))
+        else:
+            data = _extract_single(alignment)
+
         if name1:
-            data["label_top"] = str(name1)
-        if name2:
-            data["label_bottom"] = str(name2)
+            data["labels"][0] = str(name1)
+        if name2 and len(data["labels"]) > 1:
+            data["labels"][1] = str(name2)
+        if names:
+            for i, nm in enumerate(names):
+                if i < len(data["labels"]) and nm:
+                    data["labels"][i] = str(nm)
+
         data["base_width"] = base_width
         super().__init__(**data, **kwargs)
 
 
 def view(alignment: Any, **kwargs: Any) -> AlignmentViewer:
-    """Convenience constructor: ``view(aligner.align(a, b), name1=..., name2=...)``."""
+    """Convenience constructor; see :class:`AlignmentViewer`."""
     return AlignmentViewer(alignment, **kwargs)
+
+
+def stack(alignments: list, **kwargs: Any) -> AlignmentViewer:
+    """Stack a chain of pairwise alignments that share sequences.
+
+    Example: ``stack([aligner.align(A, B), aligner.align(B, C)])``.
+    """
+    return AlignmentViewer(list(alignments), **kwargs)

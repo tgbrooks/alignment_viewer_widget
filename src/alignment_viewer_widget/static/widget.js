@@ -1,12 +1,10 @@
-// Interactive pairwise-alignment viewer.
+// Interactive viewer for one or more stacked pairwise alignments.
 //
-// The main sequence panel is drawn on a <canvas> and *virtualized*: only the
-// columns currently scrolled into view are painted, so multi-kilobase
-// alignments stay responsive. A left gutter (fixed) labels the rows, a minimap
-// gives a whole-alignment overview, and a tooltip reports exact base positions.
-//
-// The column model spans the aligned region plus the unaligned flanks
-// ("overhangs") on either side of a local alignment; the flanks can be toggled.
+// The sequence panel is drawn on a <canvas> and *virtualized*: only the columns
+// scrolled into view are painted, so multi-kilobase alignments stay responsive.
+// It renders R sequence rows with connector rows between adjacent pairs, a left
+// gutter of labels, a per-row minimap (one band per sequence, blank where a
+// sequence is absent), and a tooltip with exact base positions.
 
 const COLORS = {
   matchText: "#3b3b46",
@@ -21,74 +19,97 @@ const COLORS = {
   rulerTick: "#c2c8cf",
   hover: "#0969da",
   boundary: "#b08800",
+  mmMini: "#e5484d",
+  matchMini: "#cfe8d4",
+  greyMini: "#b0b6bd",
 };
 
-// Below this column width we stop drawing glyphs and draw colored cells
-// instead — an overview "heatmap" mode for zoomed-out / very long alignments.
 const GLYPH_MIN_WIDTH = 7;
-// Reserve vertical room so the horizontal scrollbar doesn't cover the bottom
-// ruler row.
 const SCROLLBAR_H = 16;
 
-// Kind codes: 0 match, 1 mismatch, 2 gap, 3 unaligned flank.
-const KIND = { m: 0, x: 1, g: 2, u: 3 };
-
 function render({ model, el }) {
-  const top = model.get("seq_top");
-  const bot = model.get("seq_bot");
-  const kindsStr = model.get("kinds");
-  const topPos = model.get("top_pos");
-  const botPos = model.get("bot_pos");
+  const seqs = model.get("seqs");
+  const positions = model.get("positions");
+  const relations = model.get("relations");
+  const labels = model.get("labels");
+  const totals = model.get("totals");
+  const scores = model.get("scores") || [];
   const alignedStart = model.get("aligned_start");
   const alignedEnd = model.get("aligned_end");
-  const totalTop = model.get("total_top");
-  const totalBot = model.get("total_bot");
-  const tLabel = model.get("label_top") || "target";
-  const qLabel = model.get("label_bottom") || "query";
-  const score = model.get("score");
-  const L = top.length;
+  const showBoundaries = model.get("show_boundaries");
+  const R = seqs.length;
+  const L = R ? seqs[0].length : 0;
 
   let baseWidth = model.get("base_width") || 11;
 
-  const kind = new Uint8Array(L);
-  for (let i = 0; i < L; i++) kind[i] = KIND[kindsStr[i]] ?? 3;
-
-  const hasFlanks = alignedStart > 0 || alignedEnd < L;
-  let showFlanks = hasFlanks; // default: show overhangs when present
-
-  // Stats over the aligned region only.
-  let matches = 0,
-    mismatches = 0,
-    gaps = 0;
-  for (let i = alignedStart; i < alignedEnd; i++) {
-    if (kind[i] === 0) matches++;
-    else if (kind[i] === 1) mismatches++;
-    else if (kind[i] === 2) gaps++;
+  // --- Per-cell classification --------------------------------------------
+  // 'e' empty, 'g' gap, 'x' mismatch, 'a' aligned match, 'u' unaligned flank
+  function classify(r, c) {
+    const ch = seqs[r][c];
+    if (ch === " ") return "e";
+    if (ch === "-") return "g";
+    let mism = false,
+      aligned = false;
+    if (r > 0) {
+      const rr = relations[r - 1][c];
+      if (rr === "x") mism = true;
+      if (rr !== ".") aligned = true;
+    }
+    if (r < R - 1) {
+      const rr = relations[r][c];
+      if (rr === "x") mism = true;
+      if (rr !== ".") aligned = true;
+    }
+    if (mism) return "x";
+    if (aligned) return "a";
+    return "u";
   }
-  const alignedLen = alignedEnd - alignedStart;
-  const identity = alignedLen ? matches / alignedLen : 0;
+  const isDiffCol = (c) => {
+    for (let a = 0; a < R - 1; a++) {
+      const rr = relations[a][c];
+      if (rr === "x" || rr === "g") return true;
+    }
+    return false;
+  };
 
-  const rangeOf = (arr, lo, hi) => {
+  const hasFlanks =
+    showBoundaries && (alignedStart > 0 || alignedEnd < L);
+  let showFlanks = true;
+
+  // --- Stats ---------------------------------------------------------------
+  const pairStats = [];
+  for (let a = 0; a < R - 1; a++) {
+    let m = 0,
+      x = 0,
+      g = 0;
+    for (let c = 0; c < L; c++) {
+      const rr = relations[a][c];
+      if (rr === "m") m++;
+      else if (rr === "x") x++;
+      else if (rr === "g") g++;
+    }
+    const denom = m + x + g;
+    pairStats.push({ m, x, g, identity: denom ? m / denom : 0 });
+  }
+  function rowRange(r) {
     let mn = Infinity,
       mx = -Infinity;
-    for (let i = lo; i < hi; i++) {
-      const p = arr[i];
+    for (let c = 0; c < L; c++) {
+      const k = classify(r, c);
+      if (k !== "a" && k !== "x") continue;
+      const p = positions[r][c];
       if (p < 0) continue;
       if (p < mn) mn = p;
       if (p > mx) mx = p;
     }
     return mn === Infinity ? null : [mn, mx];
-  };
-  const tR = rangeOf(topPos, alignedStart, alignedEnd);
-  const qR = rangeOf(botPos, alignedStart, alignedEnd);
-  const rangeStr = (r, total) =>
-    r === null ? "—" : `${r[0] + 1}–${r[1] + 1} of ${total}`;
+  }
 
   // --- DOM scaffold --------------------------------------------------------
   el.classList.add("avw");
   el.innerHTML = `
     <div class="avw-header">
-      <div class="avw-title">Pairwise alignment</div>
+      <div class="avw-title">${R > 2 ? "Stacked alignment" : "Pairwise alignment"}</div>
       <div class="avw-stats"></div>
     </div>
     <div class="avw-toolbar">
@@ -97,7 +118,7 @@ function render({ model, el }) {
       <button class="avw-btn" data-act="prev" title="Previous mismatch / gap">◀ diff</button>
       <button class="avw-btn" data-act="next" title="Next mismatch / gap">diff ▶</button>
       <button class="avw-btn avw-flank-btn" data-act="flanks" title="Toggle unaligned flanks"></button>
-      <label class="avw-goto">Go to ${escapeHtml(tLabel)} pos
+      <label class="avw-goto">Go to ${escapeHtml(labels[0])} pos
         <input class="avw-goto-input" type="number" min="1" placeholder="…" />
       </label>
       <span class="avw-zoomlabel"></span>
@@ -114,15 +135,24 @@ function render({ model, el }) {
   `;
 
   const statsEl = el.querySelector(".avw-stats");
-  const scoreStr = score === null || score === undefined ? "" : ` · score ${score}`;
-  statsEl.innerHTML = `
-    <span><b>${(identity * 100).toFixed(1)}%</b> identity</span>
-    <span>${alignedLen.toLocaleString()} aln cols</span>
-    <span class="avw-chip avw-chip-mm">${mismatches} mismatch</span>
-    <span class="avw-chip avw-chip-gap">${gaps} gap</span>
-    <span>${escapeHtml(tLabel)}: ${rangeStr(tR, totalTop)}</span>
-    <span>${escapeHtml(qLabel)}: ${rangeStr(qR, totalBot)}</span>
-    <span>${scoreStr}</span>`;
+  const pairHtml = pairStats
+    .map(
+      (s, a) =>
+        `<span><b>${(s.identity * 100).toFixed(1)}%</b> ${escapeHtml(labels[a])}↔${escapeHtml(
+          labels[a + 1]
+        )}</span>` +
+        `<span class="avw-chip avw-chip-mm">${s.x}</span>` +
+        `<span class="avw-chip avw-chip-gap">${s.g}</span>`
+    )
+    .join("");
+  const rangeHtml = labels
+    .map((lab, r) => {
+      const rr = rowRange(r);
+      const txt = rr === null ? "—" : `${rr[0] + 1}–${rr[1] + 1}/${totals[r]}`;
+      return `<span class="avw-range">${escapeHtml(lab)}: ${txt}</span>`;
+    })
+    .join("");
+  statsEl.innerHTML = pairHtml + rangeHtml;
 
   const flankBtn = el.querySelector(".avw-flank-btn");
   if (!hasFlanks) flankBtn.style.display = "none";
@@ -136,32 +166,34 @@ function render({ model, el }) {
   const zoomLabel = el.querySelector(".avw-zoomlabel");
   const gotoInput = el.querySelector(".avw-goto-input");
 
-  // --- View range (which columns are shown) -------------------------------
   const viewStart = () => (showFlanks ? 0 : alignedStart);
   const viewEnd = () => (showFlanks ? L : alignedEnd);
   const viewLen = () => viewEnd() - viewStart();
 
-  // --- Row layout (CSS pixels) --------------------------------------------
-  const GUTTER_W = 78;
+  // --- Row layout ----------------------------------------------------------
+  const GUTTER_W = 86;
   const rulerH = 18;
   const seqRowH = 22;
-  const matchRowH = 14;
-  const layout = () => {
-    let y = rulerH;
-    const tY = y;
-    y += seqRowH;
-    const mY = y;
-    y += matchRowH;
-    const qY = y;
-    y += seqRowH;
-    const bottomRulerY = y;
-    y += rulerH;
-    return { tY, mY, qY, bottomRulerY, total: y };
-  };
-  const LY = layout();
+  const connH = 14;
+  const rowY = [];
+  const connY = [];
+  let yy = rulerH;
+  for (let r = 0; r < R; r++) {
+    rowY.push(yy);
+    yy += seqRowH;
+    if (r < R - 1) {
+      connY.push(yy);
+      yy += connH;
+    }
+  }
+  const bottomRulerY = yy;
+  yy += rulerH;
+  const TOTAL_H = yy;
+  const bandTop = rowY[0];
+  const bandBot = rowY[R - 1] + seqRowH;
   const fontPx = () => Math.min(15, Math.max(9, baseWidth + 2));
 
-  let hoverCol = -1; // data column
+  let hoverCol = -1;
 
   function fitCanvas(canvas, cssW, cssH) {
     const dpr = window.devicePixelRatio || 1;
@@ -174,24 +206,22 @@ function render({ model, el }) {
     return ctx;
   }
 
-  // --- Gutter (row labels), redrawn only on resize ------------------------
-  function drawGutter(cssH) {
-    const ctx = fitCanvas(gutter, GUTTER_W, cssH);
-    ctx.clearRect(0, 0, GUTTER_W, cssH);
+  function drawGutter() {
+    const ctx = fitCanvas(gutter, GUTTER_W, TOTAL_H);
+    ctx.clearRect(0, 0, GUTTER_W, TOTAL_H);
     ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
     ctx.textBaseline = "middle";
     ctx.textAlign = "right";
     const tx = GUTTER_W - 8;
     ctx.fillStyle = COLORS.ruler;
-    ctx.fillText("pos", tx, LY.tY - rulerH / 2);
+    ctx.fillText("pos", tx, rowY[0] - rulerH / 2);
     ctx.fillStyle = "#24292f";
-    ctx.fillText(trunc(tLabel), tx, LY.tY + seqRowH / 2);
-    ctx.fillText(trunc(qLabel), tx, LY.qY + seqRowH / 2);
+    for (let r = 0; r < R; r++) ctx.fillText(trunc(labels[r]), tx, rowY[r] + seqRowH / 2);
     ctx.fillStyle = COLORS.ruler;
-    ctx.fillText("pos", tx, LY.bottomRulerY + rulerH / 2);
+    ctx.fillText("pos", tx, bottomRulerY + rulerH / 2);
   }
   function trunc(s) {
-    return s.length > 11 ? s.slice(0, 10) + "…" : s;
+    return s.length > 12 ? s.slice(0, 11) + "…" : s;
   }
 
   function rulerStep() {
@@ -202,12 +232,11 @@ function render({ model, el }) {
     return nice[nice.length - 1];
   }
 
-  // --- Main panel: virtualized draw ---------------------------------------
+  // --- Main panel ----------------------------------------------------------
   function drawMain() {
     const cssW = scrollEl.clientWidth;
-    const cssH = LY.total;
-    const ctx = fitCanvas(main, cssW, cssH);
-    ctx.clearRect(0, 0, cssW, cssH);
+    const ctx = fitCanvas(main, cssW, TOTAL_H);
+    ctx.clearRect(0, 0, cssW, TOTAL_H);
 
     const r0 = viewStart();
     const N = viewLen();
@@ -216,72 +245,65 @@ function render({ model, el }) {
     const lastS = Math.min(N - 1, Math.ceil((scrollLeft + cssW) / baseWidth));
     const glyphs = baseWidth >= GLYPH_MIN_WIDTH;
     const step = rulerStep();
-    const bandH = LY.qY + seqRowH - LY.tY;
 
     ctx.font = `${fontPx()}px ui-monospace, SFMono-Regular, Menlo, monospace`;
     ctx.textBaseline = "middle";
     ctx.textAlign = "center";
 
     for (let s = firstS; s <= lastS; s++) {
-      const i = r0 + s; // data column
+      const c = r0 + s;
       const x = s * baseWidth - scrollLeft;
       const cx = x + baseWidth / 2;
-      const k = kind[i];
-      const tc = top[i];
-      const qc = bot[i];
 
-      // Column background (none for plain matches).
-      const bg =
-        k === 1 ? COLORS.mismatchBg : k === 2 ? COLORS.gapBg : k === 3 ? COLORS.flankBg : null;
-      if (bg) {
-        ctx.fillStyle = bg;
-        ctx.fillRect(x, LY.tY, baseWidth, bandH);
+      for (let r = 0; r < R; r++) {
+        const k = classify(r, c);
+        const yMid = rowY[r] + seqRowH / 2;
+        const bg = k === "x" ? COLORS.mismatchBg : k === "g" ? COLORS.gapBg : k === "u" ? COLORS.flankBg : null;
+        if (bg) {
+          ctx.fillStyle = bg;
+          ctx.fillRect(x, rowY[r], baseWidth, seqRowH);
+        }
+        const ch = seqs[r][c];
+        if (glyphs) {
+          if (ch !== " ") {
+            ctx.fillStyle = glyphColor(k);
+            ctx.fillText(ch, cx, yMid);
+          }
+        } else if (k !== "e" && k !== "g") {
+          ctx.fillStyle = cellFill(k);
+          ctx.fillRect(x + 0.5, rowY[r] + 2, baseWidth - 1, seqRowH - 4);
+        }
       }
 
+      // Connectors between adjacent rows.
       if (glyphs) {
-        if (tc !== " ") {
-          ctx.fillStyle = glyphColor(k);
-          ctx.fillText(tc, cx, LY.tY + seqRowH / 2);
-        }
-        if (k === 0) {
-          ctx.fillStyle = COLORS.matchBar;
-          ctx.fillText("|", cx, LY.mY + matchRowH / 2);
-        } else if (k === 1) {
-          ctx.fillStyle = COLORS.mismatchText;
-          ctx.fillText("·", cx, LY.mY + matchRowH / 2);
-        }
-        if (qc !== " ") {
-          ctx.fillStyle = glyphColor(k);
-          ctx.fillText(qc, cx, LY.qY + seqRowH / 2);
-        }
-      } else {
-        if (tc !== " ") {
-          ctx.fillStyle = cellFill(k);
-          ctx.fillRect(x + 0.5, LY.tY + 2, baseWidth - 1, seqRowH - 4);
-        }
-        if (qc !== " ") {
-          ctx.fillStyle = cellFill(k);
-          ctx.fillRect(x + 0.5, LY.qY + 2, baseWidth - 1, seqRowH - 4);
+        for (let a = 0; a < R - 1; a++) {
+          const rr = relations[a][c];
+          if (rr === "m") {
+            ctx.fillStyle = COLORS.matchBar;
+            ctx.fillText("|", cx, connY[a] + connH / 2);
+          } else if (rr === "x") {
+            ctx.fillStyle = COLORS.mismatchText;
+            ctx.fillText("·", cx, connY[a] + connH / 2);
+          }
         }
       }
 
-      tick(ctx, topPos[i], step, LY.tY, -1, cx);
-      tick(ctx, botPos[i], step, LY.bottomRulerY, +1, cx);
+      tick(ctx, positions[0][c], step, rowY[0], -1, cx);
+      tick(ctx, positions[R - 1][c], step, bottomRulerY, +1, cx);
     }
 
-    // Alignment-boundary markers (where the aligned region starts/ends).
     if (showFlanks && hasFlanks) {
       boundary(ctx, alignedStart - r0, scrollLeft);
       boundary(ctx, alignedEnd - r0, scrollLeft);
     }
 
-    // Hover highlight.
     const hs = hoverCol - r0;
     if (hs >= firstS && hs <= lastS) {
       const x = hs * baseWidth - scrollLeft;
       ctx.strokeStyle = COLORS.hover;
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(x + 0.5, LY.tY - 1, baseWidth - 1, bandH + 2);
+      ctx.strokeRect(x + 0.5, bandTop - 1, baseWidth - 1, bandBot - bandTop + 2);
     }
 
     drawMinimapViewport(firstS, lastS);
@@ -293,70 +315,81 @@ function render({ model, el }) {
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.moveTo(x, LY.tY);
-    ctx.lineTo(x, LY.qY + seqRowH);
+    ctx.moveTo(x, bandTop);
+    ctx.lineTo(x, bandBot);
     ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  function tick(ctx, p, step, rowY, dir, cx) {
+  function tick(ctx, p, step, rowYpos, dir, cx) {
     if (p < 0 || (p + 1) % step !== 0) return;
     ctx.save();
     ctx.strokeStyle = COLORS.rulerTick;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(cx, dir < 0 ? rowY - 5 : rowY);
-    ctx.lineTo(cx, dir < 0 ? rowY : rowY + 5);
+    ctx.moveTo(cx, dir < 0 ? rowYpos - 5 : rowYpos + seqRowH);
+    ctx.lineTo(cx, dir < 0 ? rowYpos : rowYpos + seqRowH + 5);
     ctx.stroke();
     ctx.fillStyle = COLORS.ruler;
     ctx.font = "10px ui-monospace, monospace";
     ctx.textBaseline = dir < 0 ? "bottom" : "top";
     ctx.textAlign = "center";
-    ctx.fillText(String(p + 1), cx, dir < 0 ? rowY - 6 : rowY + 6);
+    const ty = dir < 0 ? rowYpos - 6 : rowYpos + seqRowH + 6;
+    ctx.fillText(String(p + 1), cx, ty);
     ctx.restore();
   }
 
   function glyphColor(k) {
-    if (k === 3) return COLORS.flankText;
-    if (k === 2) return COLORS.gapText;
-    if (k === 1) return COLORS.mismatchText;
+    if (k === "u") return COLORS.flankText;
+    if (k === "g") return COLORS.gapText;
+    if (k === "x") return COLORS.mismatchText;
     return COLORS.matchText;
   }
   function cellFill(k) {
-    if (k === 3) return "#cdd2d8";
-    if (k === 2) return COLORS.gapText;
-    if (k === 1) return "#e5484d";
+    if (k === "u") return COLORS.greyMini;
+    if (k === "x") return COLORS.mmMini;
     return "#9fd3a8";
   }
 
-  // --- Minimap -------------------------------------------------------------
+  // --- Minimap (one band per sequence) ------------------------------------
   let minimapW = 0;
-  const minimapH = 34;
+  const bandH = 9;
+  const minimapH = 4 + R * bandH;
   function drawMinimap() {
     minimapW = el.clientWidth - 4;
     if (minimapW <= 0) return;
     const ctx = fitCanvas(minimap, minimapW, minimapH);
     ctx.clearRect(0, 0, minimapW, minimapH);
-    ctx.fillStyle = "#f6f8fa";
+    ctx.fillStyle = "#fbfcfd";
     ctx.fillRect(0, 0, minimapW, minimapH);
     const r0 = viewStart();
     const N = viewLen();
     for (let px = 0; px < minimapW; px++) {
       const c0 = r0 + Math.floor((px / minimapW) * N);
       const c1 = r0 + Math.max(1, Math.floor(((px + 1) / minimapW) * N));
-      let mm = false,
-        grey = false;
-      for (let c = c0; c < c1 && c < r0 + N; c++) {
-        const k = kind[c];
-        if (k === 1) {
-          mm = true;
-          break;
+      for (let r = 0; r < R; r++) {
+        let col = null; // priority: mismatch > match > grey
+        for (let c = c0; c < c1 && c < r0 + N; c++) {
+          const k = classify(r, c);
+          if (k === "x") {
+            col = COLORS.mmMini;
+            break;
+          }
+          if (k === "a") col = col === COLORS.greyMini || col === null ? COLORS.matchMini : col;
+          else if (k === "g" || k === "u") col = col === null ? COLORS.greyMini : col;
         }
-        if (k === 2 || k === 3) grey = true;
+        if (!col) continue;
+        ctx.fillStyle = col;
+        ctx.fillRect(px, 2 + r * bandH, 1, bandH - 1);
       }
-      if (!mm && !grey) continue;
-      ctx.fillStyle = mm ? "#e5484d" : "#b0b6bd";
-      ctx.fillRect(px, 4, 1, minimapH - 8);
+    }
+    // Row separators.
+    ctx.strokeStyle = "#e6e9ec";
+    for (let r = 1; r < R; r++) {
+      ctx.beginPath();
+      ctx.moveTo(0, 2 + r * bandH + 0.5);
+      ctx.lineTo(minimapW, 2 + r * bandH + 0.5);
+      ctx.stroke();
     }
   }
   function drawMinimapViewport(firstS, lastS) {
@@ -366,7 +399,7 @@ function render({ model, el }) {
     const N = viewLen();
     const x0 = (firstS / N) * minimapW;
     const x1 = (Math.min(lastS + 1, N) / N) * minimapW;
-    ctx.fillStyle = "rgba(9,105,218,0.15)";
+    ctx.fillStyle = "rgba(9,105,218,0.12)";
     ctx.fillRect(x0, 0, Math.max(2, x1 - x0), minimapH);
     ctx.strokeStyle = COLORS.hover;
     ctx.lineWidth = 1;
@@ -379,7 +412,6 @@ function render({ model, el }) {
     const local = clientX - rect.left + scrollEl.scrollLeft;
     return viewStart() + Math.floor(local / baseWidth);
   }
-
   function centerOnColumn(dataCol) {
     const r0 = viewStart();
     const N = viewLen();
@@ -405,27 +437,15 @@ function render({ model, el }) {
   main.addEventListener("mouseleave", hideTooltip);
 
   function showTooltip(e, col) {
-    const k = kind[col];
-    const ti = topPos[col];
-    const qi = botPos[col];
-    const label =
-      k === 0
-        ? `<span class="avw-tt-match">match</span>`
-        : k === 1
-        ? `<span class="avw-tt-mm">mismatch</span>`
-        : k === 2
-        ? `<span class="avw-tt-gap">gap</span>`
-        : `<span class="avw-tt-gap">unaligned</span>`;
-    const cell = (name, ch, pos) =>
-      `<div><span class="avw-tt-key">${escapeHtml(name)}</span> ` +
-      (pos < 0 || ch === " " || ch === "-"
-        ? `<i>${ch === "-" ? "gap" : "—"}</i>`
-        : `<code>${ch}</code> @ <b>${pos + 1}</b>`) +
-      `</div>`;
-    tooltip.innerHTML =
-      `<div class="avw-tt-head">${label}</div>` +
-      cell(tLabel, top[col], ti) +
-      cell(qLabel, bot[col], qi);
+    let rows = "";
+    for (let r = 0; r < R; r++) {
+      const ch = seqs[r][col];
+      const p = positions[r][col];
+      const body =
+        ch === " " ? "<i>—</i>" : ch === "-" ? "<i>gap</i>" : `<code>${ch}</code> @ <b>${p + 1}</b>`;
+      rows += `<div><span class="avw-tt-key">${escapeHtml(labels[r])}</span> ${body}</div>`;
+    }
+    tooltip.innerHTML = `<div class="avw-tt-head">column ${col + 1} / ${L}</div>${rows}`;
     tooltip.hidden = false;
     const erect = el.getBoundingClientRect();
     let x = e.clientX - erect.left + 12;
@@ -443,7 +463,6 @@ function render({ model, el }) {
     }
   }
 
-  // Minimap navigation (click + drag).
   let dragging = false;
   function minimapJump(clientX) {
     const rect = minimap.getBoundingClientRect();
@@ -461,7 +480,6 @@ function render({ model, el }) {
     dragging = false;
   });
 
-  // Jump to a target-sequence position (1-based) within the current view.
   gotoInput.addEventListener("change", () => {
     const pos = parseInt(gotoInput.value, 10);
     if (!Number.isFinite(pos)) return;
@@ -469,8 +487,8 @@ function render({ model, el }) {
     let best = -1,
       bestD = Infinity;
     for (let i = viewStart(); i < viewEnd(); i++) {
-      if (topPos[i] < 0) continue;
-      const d = Math.abs(topPos[i] - want);
+      if (positions[0][i] < 0) continue;
+      const d = Math.abs(positions[0][i] - want);
       if (d < bestD) {
         bestD = d;
         best = i;
@@ -480,11 +498,10 @@ function render({ model, el }) {
     if (best >= 0) centerOnColumn(best);
   });
 
-  // Jump to next/previous mismatch-or-gap.
   function jumpDiff(dir) {
     let i = centerDataCol() + dir;
     while (i >= viewStart() && i < viewEnd()) {
-      if (kind[i] === 1 || kind[i] === 2) {
+      if (isDiffCol(i)) {
         centerOnColumn(i);
         return;
       }
@@ -522,14 +539,12 @@ function render({ model, el }) {
     }
   });
 
-  // --- Sizing --------------------------------------------------------------
   function resizeAll() {
     spacer.style.width = viewLen() * baseWidth + "px";
-    spacer.style.height = LY.total + "px";
-    main.style.marginTop = -LY.total + "px";
-    // Extra room so the horizontal scrollbar doesn't cover the bottom ruler.
-    scrollEl.style.height = LY.total + SCROLLBAR_H + "px";
-    drawGutter(LY.total);
+    spacer.style.height = TOTAL_H + "px";
+    main.style.marginTop = -TOTAL_H + "px";
+    scrollEl.style.height = TOTAL_H + SCROLLBAR_H + "px";
+    drawGutter();
     drawMinimap();
     drawMain();
   }

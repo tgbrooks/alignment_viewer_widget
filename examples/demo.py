@@ -8,8 +8,8 @@ app = marimo.App(width="medium")
 def _():
     import marimo as mo
     from Bio.Align import PairwiseAligner
-    from alignment_viewer_widget import AlignmentViewer
-    return AlignmentViewer, PairwiseAligner, mo
+    from alignment_viewer_widget import AlignmentViewer, stack
+    return AlignmentViewer, PairwiseAligner, mo, stack
 
 
 @app.cell
@@ -27,8 +27,12 @@ def _(mo):
         - For local alignments, the unaligned **flanks/overhangs** on either
           side are shown greyed (toggle with the `Flanks` button); a dashed
           marker shows where the alignment begins/ends.
-        - Name the rows with `name1=` / `name2=` (or they default to the
-          `SeqRecord` ids, else "target"/"query").
+        - **Stack multiple pairwise alignments** that share a sequence (A–B and
+          B–C) with `stack([...])` to see A, B, C together. The minimap has one
+          band per sequence — blank where a sequence is absent — so you can see
+          where each one starts and ends.
+        - Name the rows with `name1=` / `name2=` / `names=[...]` (or they
+          default to the `SeqRecord` ids, else `seq1`, `seq2`, …).
         - Use `+ / −` to zoom (down to an overview heatmap for long alignments)
           and `◀ diff / diff ▶` to hop between differences.
         """
@@ -147,6 +151,48 @@ def _(AlignmentViewer, aligner, random):
         base_width=10,
     )
     return ref_genome, sample_read
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## Stacking multiple pairwise alignments
+
+        If you have A aligned to B and B aligned to C, `stack([...])` merges
+        them on the shared sequence B and shows all three rows at once (the
+        A–C alignment is not needed). Each sequence gets its own minimap band,
+        blank where that sequence isn't present — so you can see, for example,
+        that `readC` only covers the right portion of the reference.
+        """
+    )
+    return
+
+
+@app.cell
+def _(aligner, random, stack):
+    _rng = random.Random(11)
+    ref_B = "".join(_rng.choice("ACGT") for _ in range(700))
+
+    def _mut(seq, n):
+        s = list(seq)
+        for _ in range(n):
+            j = _rng.randrange(len(s))
+            s[j] = _rng.choice([b for b in "ACGT" if b != s[j]])
+        return "".join(s)
+
+    def _flank(n):
+        return "".join(_rng.choice("ACGT") for _ in range(n))
+
+    read_A = _flank(80) + _mut(ref_B[50:450], 12) + _flank(40)
+    read_C = _flank(30) + _mut(ref_B[250:700], 14) + _flank(90)
+
+    stack(
+        [aligner.align(read_A, ref_B), aligner.align(ref_B, read_C)],
+        names=["readA", "refB", "readC"],
+        base_width=10,
+    )
+    return read_A, read_C, ref_B
 
 
 @app.cell

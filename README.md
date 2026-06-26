@@ -14,12 +14,15 @@ strip** with:
 - the unaligned **flanks / overhangs** of a local alignment shown greyed on
   either side (with dashed markers at the alignment boundaries), toggleable
   with the `Flanks` button;
-- **custom row names** via `name1=` / `name2=` (falling back to `SeqRecord`
-  ids);
+- **stacking of multiple pairwise alignments** that share a sequence (A–B and
+  B–C → A, B, C shown together), merged on the shared sequence;
+- **custom row names** via `name1=` / `name2=` / `names=[...]` (falling back to
+  `SeqRecord` ids, else `seq1`, `seq2`, …);
 - a **hover tooltip** reporting the exact base and position in each sequence
   for any column;
-- a **minimap** showing where mismatches (red) and gaps/overhangs (grey) occur
-  across the whole alignment — click or drag to jump;
+- a **minimap with one band per sequence** (blank where a sequence is absent,
+  so you can see where each starts/ends), red for mismatches and grey for
+  gaps/overhangs — click or drag to jump;
 - **zoom** from per-base glyphs down to an overview "heatmap" for kilobase
   alignments, plus **next/previous-difference** navigation and a
   **go-to-position** box;
@@ -83,7 +86,25 @@ You can pass either the `PairwiseAlignments` object returned by
 `aligner.align(...)` (the best alignment is shown) or an individual
 `Bio.Align.Alignment`. Row labels come from `name1` / `name2` if given,
 otherwise from the inputs' `SeqRecord` ids, otherwise default to
-"target" / "query".
+`seq1`, `seq2`, ….
+
+### Stacking pairwise alignments through a shared sequence
+
+If you have two (or more) pairwise alignments that share a sequence — say A
+aligned to B and B aligned to C — `stack(...)` merges them on the shared
+sequence and shows A, B and C together (the A–C alignment is not required):
+
+```python
+from alignment_viewer_widget import stack
+
+ab = aligner.align(seq_a, seq_b)
+bc = aligner.align(seq_b, seq_c)
+stack([ab, bc], names=["A", "B", "C"])
+```
+
+Consecutive alignments must share a sequence (matched by identity). The
+minimap shows one band per sequence, blank where that sequence isn't present,
+so you can see where each one begins and ends.
 
 ## Example notebook
 
