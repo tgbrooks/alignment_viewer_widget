@@ -321,21 +321,22 @@ function render({ model, el }) {
     ctx.setLineDash([]);
   }
 
-  function tick(ctx, p, step, rowYpos, dir, cx) {
+  // Draws a ruler tick + label at the baseline `baseY`. dir < 0 puts it above
+  // the baseline (top ruler), dir > 0 below it (bottom ruler).
+  function tick(ctx, p, step, baseY, dir, cx) {
     if (p < 0 || (p + 1) % step !== 0) return;
     ctx.save();
     ctx.strokeStyle = COLORS.rulerTick;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(cx, dir < 0 ? rowYpos - 5 : rowYpos + seqRowH);
-    ctx.lineTo(cx, dir < 0 ? rowYpos : rowYpos + seqRowH + 5);
+    ctx.moveTo(cx, dir < 0 ? baseY - 5 : baseY);
+    ctx.lineTo(cx, dir < 0 ? baseY : baseY + 5);
     ctx.stroke();
     ctx.fillStyle = COLORS.ruler;
     ctx.font = "10px ui-monospace, monospace";
     ctx.textBaseline = dir < 0 ? "bottom" : "top";
     ctx.textAlign = "center";
-    const ty = dir < 0 ? rowYpos - 6 : rowYpos + seqRowH + 6;
-    ctx.fillText(String(p + 1), cx, ty);
+    ctx.fillText(String(p + 1), cx, dir < 0 ? baseY - 6 : baseY + 6);
     ctx.restore();
   }
 
