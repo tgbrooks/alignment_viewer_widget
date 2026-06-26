@@ -78,6 +78,10 @@
   background: #f3f4f6;
 }
 
+.avw-flank-btn {
+  font-variant-numeric: tabular-nums;
+}
+
 .avw-goto {
   display: inline-flex;
   align-items: center;
